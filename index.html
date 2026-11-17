@@ -1,0 +1,951 @@
+
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bosque Mágico y Océano</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js"></script>
+
+<link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div id="forest"></div>
+<canvas id="darkness"></canvas>
+<canvas id="fireflies"></canvas>
+
+<div id="oceanScene">
+ <canvas id="oceanCanvas"></canvas>
+</div>
+
+<div id="panel">
+ <div id="status">Cámara apagada. Pulsa para comenzar.</div>
+ <button id="start">ACTIVAR CÁMARA</button>
+ <button id="cameraVisibility" disabled>OCULTAR CÁMARA</button>
+ <button id="sceneToggle">IR AL ESCENARIO: OCÉANO</button>
+ <button id="soundToggle">SONIDO: ACTIVADO</button>
+ <div id="help">
+  Mano abierta: bosque iluminado.<br>
+  Puño cerrado: noche oscura; las luciérnagas iluminan al pasar.
+ </div>
+</div>
+
+<!-- BOTÓN PARA OCULTAR Y MOSTRAR EL PANEL -->
+<button id="panelToggle">☰ Ocultar panel</button>
+
+<div id="preview">
+ <video id="video" autoplay playsinline muted></video>
+ <canvas id="handCanvas" width="640" height="480"></canvas>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+const $ = id => document.getElementById(id);
+const video=$('video'), preview=$('preview'), status=$('status');
+const startButton=$('start'), cameraButton=$('cameraVisibility');
+const sceneButton=$('sceneToggle'), help=$('help');
+const soundButton=$('soundToggle');
+const fireCanvas=$('fireflies'), fireCtx=fireCanvas.getContext('2d');
+const darkness=$('darkness'), darkCtx=darkness.getContext('2d'), forest=$('forest');
+const handCanvas=$('handCanvas'), handCtx=handCanvas.getContext('2d');
+const oceanCanvas=$('oceanCanvas'), oceanCtx=oceanCanvas.getContext('2d');
+
+/* CONTROL DEL PANEL */
+const panelToggle=$('panelToggle');
+const controlPanel=$('panel');
+
+panelToggle.addEventListener('click',()=>{
+ controlPanel.classList.toggle('panel-hidden');
+
+ const hidden=controlPanel.classList.contains('panel-hidden');
+
+ panelToggle.textContent=hidden
+  ?'☰ Mostrar panel'
+  :'☰ Ocultar panel';
+});
+
+let W=innerWidth,H=innerHeight,DPR=1;
+let hands=null,stream=null,running=false,sending=false;
+let cameraFrame=0,lastSend=0,lastSeen=0;
+let scene='forest',gesture='open',handVisible=false;
+let fistFrames=0,openFrames=0;
+let soundEnabled=true;
+let audioUnlocked=false, ambientFadeTimer=null, activeAmbient='', lastSoundState=null;
+let oceanActivity=0;
+
+const ambientTracks={
+ day:new Audio('https://commons.wikimedia.org/wiki/Special:Redirect/file/20090610_0_ambience.ogg'),
+ night:new Audio('https://commons.wikimedia.org/wiki/Special:Redirect/file/Nightingale_wind_crickets_-_cut.ogg'),
+ oceanCalm:new Audio('https://commons.wikimedia.org/wiki/Special:Redirect/file/Water_on_Rocks.ogg'),
+ ocean:new Audio('https://commons.wikimedia.org/wiki/Special:Redirect/file/Oceanwavescrushing.ogg')
+};
+
+for(const track of Object.values(ambientTracks)){
+ track.loop=true;
+ track.preload='none';
+ track.volume=0;
+}
+
+let filteredX=W/2,filteredY=H/2;
+let rawX=W/2,rawY=H/2;
+let filteredSpeed=0;
+
+let glow=.2,dark=.04;
+
+const shared={
+ x:W/2,y:H/2,visible:false,speed:0
+};
+
+window.bosqueHandState=shared;
+
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const rand=(a,b)=>a+Math.random()*(b-a);
+
+/* AMBIENTES NATURALES GRABADOS */
+function initAudio(){
+ audioUnlocked=true;
+ updateSoundMode();
+}
+
+function updateSoundMode(){
+ if(!audioUnlocked)return;
+
+ const mode=scene==='ocean'?'ocean':(handVisible&&gesture==='fist'?'night':'day');
+
+ if(mode===activeAmbient&&lastSoundState===soundEnabled)return;
+
+ activeAmbient=mode;
+ lastSoundState=soundEnabled;
+
+ for(const [name,track] of Object.entries(ambientTracks)){
+  const shouldPlay=mode==='ocean'?(name==='oceanCalm'||name==='ocean'):(name===mode);
+
+  if(soundEnabled&&shouldPlay){
+   if(track.paused){
+    track.play().catch(()=>{
+     status.textContent='Pulsa ACTIVAR CÁMARA o SONIDO para escuchar el ambiente.';
+    });
+   }
+  }
+ }
+
+ if(ambientFadeTimer)clearInterval(ambientFadeTimer);
+
+ ambientFadeTimer=setInterval(()=>{
+  for(const [name,track] of Object.entries(ambientTracks)){
+   let target=0;
+
+   if(soundEnabled&&activeAmbient==='ocean'){
+    if(name==='oceanCalm')target=.58-oceanActivity*.28;
+    if(name==='ocean')target=.035+oceanActivity*.70;
+   }else if(soundEnabled&&name===activeAmbient){
+    target=.72;
+   }
+
+   const difference=target-track.volume;
+   track.volume=Math.abs(difference)<0.015?target:track.volume+difference*.22;
+
+   if(!soundEnabled||name!==activeAmbient){
+    if(track.volume<0.015){
+     track.volume=0;
+     track.pause();
+    }
+   }
+  }
+
+  if(!soundEnabled&&Object.values(ambientTracks).every(t=>t.paused)){
+   clearInterval(ambientFadeTimer);
+   ambientFadeTimer=null;
+  }
+ },90);
+}
+
+function updateOceanSound(){
+ const desired=clamp(speedSmooth/.42,0,1);
+ oceanActivity+=(desired-oceanActivity)*.12;
+ updateSoundMode();
+}
+
+soundButton.addEventListener('click',()=>{
+ soundEnabled=!soundEnabled;
+ soundButton.textContent=soundEnabled?'SONIDO: ACTIVADO':'SONIDO: APAGADO';
+
+ if(soundEnabled)initAudio();
+ else updateSoundMode();
+});
+
+/* REDIMENSIONAR */
+function resize(){
+
+ W=innerWidth;
+ H=innerHeight;
+ DPR=Math.min(devicePixelRatio||1,1.25);
+
+ for(const c of [darkness,fireCanvas,oceanCanvas]){
+  c.width=Math.round(W*DPR);
+  c.height=Math.round(H*DPR);
+  c.style.width=W+'px';
+  c.style.height=H+'px';
+  c.getContext('2d').setTransform(DPR,0,0,DPR,0,0);
+ }
+
+ filteredX=clamp(filteredX,0,W);
+ filteredY=clamp(filteredY,0,H);
+
+ shared.x=filteredX;
+ shared.y=filteredY;
+}
+
+addEventListener('resize',resize);
+
+document.addEventListener('visibilitychange',()=>{
+ if(document.hidden){
+  if(audioCtx) masterGain?.gain.setTargetAtTime(0,audioCtx.currentTime,.05);
+ }else{
+  updateSoundMode();
+  updateOceanSound();
+ }
+});
+
+resize();
+
+/* LUCIÉRNAGAS */
+const particles=[];
+
+const particleCount=Math.min(48,Math.max(28,Math.floor((W*H)/30000)));
+
+for(let i=0;i<particleCount;i++){
+ const x=rand(0,W);
+ const y=rand(0,H);
+
+ particles.push({
+  x,y,
+  vx:rand(-.25,.25),
+  vy:rand(-.25,.25),
+  homeX:x,
+  homeY:y,
+  size:rand(1.2,2.6),
+  phase:rand(0,Math.PI*2),
+  speed:rand(.7,1.4),
+  angle:rand(0,Math.PI*2),
+  radius:Math.sqrt(Math.random())*105
+ });
+}
+
+/* DETECCIÓN DE GESTOS */
+function detectGesture(lm){
+
+ const wrist=lm[0];
+ const tips=[8,12,16,20];
+ const joints=[6,10,14,18];
+
+ let extended=0;
+
+ for(let i=0;i<4;i++){
+  if(
+   dist(lm[tips[i]],wrist)>
+   dist(lm[joints[i]],wrist)*1.12
+  ){
+   extended++;
+  }
+ }
+
+ const thumb=
+  dist(lm[4],lm[5])>
+  dist(lm[3],lm[5])*1.05;
+
+ if(extended>=3||(extended>=2&&thumb))
+  return 'open';
+
+ if(extended<=1&&!thumb)
+  return 'fist';
+
+ return 'unknown';
+}
+
+/* DIBUJAR MANO */
+function drawHand(lm){
+
+ handCtx.clearRect(0,0,640,480);
+
+ if(!lm)return;
+
+ const lines=[
+ [0,1],[1,2],[2,3],[3,4],
+ [0,5],[5,6],[6,7],[7,8],
+ [5,9],[9,10],[10,11],[11,12],
+ [9,13],[13,14],[14,15],[15,16],
+ [13,17],[17,18],[18,19],[19,20],
+ [0,17]
+ ];
+
+ handCtx.strokeStyle='#5cff8d';
+ handCtx.lineWidth=3;
+ handCtx.shadowColor='#00ff72';
+ handCtx.shadowBlur=5;
+
+ for(const [a,b] of lines){
+  handCtx.beginPath();
+  handCtx.moveTo(lm[a].x*640,lm[a].y*480);
+  handCtx.lineTo(lm[b].x*640,lm[b].y*480);
+  handCtx.stroke();
+ }
+
+ handCtx.shadowBlur=0;
+ handCtx.fillStyle='#fff';
+
+ for(const p of lm){
+  handCtx.beginPath();
+  handCtx.arc(p.x*640,p.y*480,3,0,Math.PI*2);
+  handCtx.fill();
+ }
+}
+
+/* SEGUIMIENTO DE LA MANO */
+function onResults(results){
+
+ const lm=results.multiHandLandmarks?.[0];
+
+ if(!lm){
+
+  drawHand(null);
+
+  if(performance.now()-lastSeen>550){
+   handVisible=false;
+   shared.visible=false;
+   shared.speed=0;
+   filteredSpeed=0;
+
+   if(running){
+    status.textContent='Buscando mano...';
+   }
+  }
+
+  return;
+ }
+
+ lastSeen=performance.now();
+ handVisible=true;
+
+ drawHand(lm);
+
+ const px=(
+  lm[0].x+lm[5].x+lm[9].x+
+  lm[13].x+lm[17].x
+ )/5;
+
+ const py=(
+  lm[0].y+lm[5].y+lm[9].y+
+  lm[13].y+lm[17].y
+ )/5;
+
+ rawX=(1-px)*W;
+ rawY=py*H;
+
+ const delta=Math.hypot(
+  rawX-filteredX,
+  rawY-filteredY
+ );
+
+ const alpha=clamp(.16+delta/180,.16,.58);
+
+ const oldX=filteredX;
+ const oldY=filteredY;
+
+ filteredX+=(rawX-filteredX)*alpha;
+ filteredY+=(rawY-filteredY)*alpha;
+
+ const dt=Math.max(
+  16,
+  performance.now()-(shared.lastTime||performance.now())
+ );
+
+ const instantSpeed=
+  Math.hypot(filteredX-oldX,filteredY-oldY)/dt;
+
+ filteredSpeed+=(instantSpeed-filteredSpeed)*.28;
+
+ shared.x=filteredX;
+ shared.y=filteredY;
+ shared.speed=filteredSpeed;
+ shared.visible=true;
+ shared.lastTime=performance.now();
+
+ const g=detectGesture(lm);
+
+ if(g==='fist'){
+  fistFrames++;
+  openFrames=0;
+
+  if(fistFrames>=4)gesture='fist';
+
+ }else if(g==='open'){
+  openFrames++;
+  fistFrames=0;
+
+  if(openFrames>=4)gesture='open';
+ }
+
+ status.textContent=gesture==='fist'
+  ?'Mano detectada · Puño cerrado'
+  :'Mano detectada · Mano abierta';
+}
+
+/* ACTIVAR CÁMARA */
+async function startCamera(){
+
+ if(running)return;
+
+ initAudio();
+
+ startButton.disabled=true;
+ status.textContent='Iniciando cámara...';
+
+ try{
+
+  if(!navigator.mediaDevices?.getUserMedia)
+   throw new Error('Abre la página desde HTTPS o localhost.');
+
+  if(typeof Hands==='undefined')
+   throw new Error('No se pudo cargar MediaPipe. Comprueba Internet.');
+
+  hands=new Hands({
+   locateFile:file=>
+    'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/'+file
+  });
+
+  hands.setOptions({
+   maxNumHands:1,
+   modelComplexity:0,
+   minDetectionConfidence:.58,
+   minTrackingConfidence:.62
+  });
+
+  hands.onResults(onResults);
+
+  stream=await navigator.mediaDevices.getUserMedia({
+   audio:false,
+   video:{
+    facingMode:'user',
+    width:{ideal:640},
+    height:{ideal:480},
+    frameRate:{ideal:30,max:30}
+   }
+  });
+
+  video.srcObject=stream;
+  await video.play();
+
+  running=true;
+
+  preview.style.display='block';
+  cameraButton.disabled=false;
+  cameraButton.textContent='OCULTAR CÁMARA';
+
+  startButton.textContent='CÁMARA ACTIVADA';
+  status.textContent='Cámara activa. Muestra tu mano.';
+
+  cameraFrame=requestAnimationFrame(processCamera);
+
+ }catch(e){
+
+  console.error(e);
+
+  status.textContent='Error: '+e.message;
+  startButton.disabled=false;
+  startButton.textContent='REINTENTAR CÁMARA';
+
+  if(stream)
+   stream.getTracks().forEach(t=>t.stop());
+
+  if(hands){
+   try{await hands.close()}catch(_){}
+  }
+
+  hands=null;
+  stream=null;
+  running=false;
+ }
+}
+
+/* PROCESAMIENTO DE CÁMARA */
+async function processCamera(t){
+
+ if(!running)return;
+
+ if(video.readyState>=2&&!sending&&t-lastSend>=33){
+
+  sending=true;
+  lastSend=t;
+
+  try{
+   await hands.send({image:video});
+  }catch(e){
+   console.warn('MediaPipe:',e);
+  }
+
+  sending=false;
+ }
+
+ if(running){
+  cameraFrame=requestAnimationFrame(processCamera);
+ }
+}
+
+startButton.addEventListener('click',startCamera);
+
+/* MOSTRAR Y OCULTAR CÁMARA */
+cameraButton.addEventListener('click',()=>{
+
+ if(!running)return;
+
+ const show=preview.style.display==='none';
+
+ preview.style.display=show?'block':'none';
+
+ cameraButton.textContent=
+  show?'OCULTAR CÁMARA':'MOSTRAR CÁMARA';
+});
+
+/* INSTRUCCIONES */
+function updateInstructions(){
+
+ if(scene==='forest'){
+
+  help.innerHTML=
+   '<strong>🌳 CONTROLES DEL BOSQUE</strong>'+
+   'Mano abierta: bosque iluminado.<br>'+
+   'Puño cerrado: noche oscura; solo iluminan las luciérnagas.<br>'+
+   'Las luciérnagas siguen tu mano.<br>'+
+   'Ambiente natural: aves y viento de día; insectos y brisa de noche.';
+
+  sceneButton.textContent='IR AL ESCENARIO: OCÉANO';
+
+ }else{
+
+  help.innerHTML=
+   '<strong>🌊 CONTROLES DEL OCÉANO</strong>'+
+   'Mover la mano: dirige las olas.<br>'+
+   'Subir y bajar: modifica el movimiento del agua.<br>'+
+   'Mover rápido: crea olas más intensas.<br>'+
+   'Dejar quieta la mano: el mar se calma.<br>'+
+   'Oleaje ambiental con espuma y rompiente.';
+
+  sceneButton.textContent='VOLVER AL ESCENARIO: BOSQUE';
+ }
+}
+
+sceneButton.addEventListener('click',()=>{
+
+ scene=scene==='forest'?'ocean':'forest';
+
+ document.body.classList.toggle(
+  'ocean-active',
+  scene==='ocean'
+ );
+
+ updateInstructions();
+ updateSoundMode();
+ updateOceanSound();
+});
+
+/* ANIMACIÓN DEL BOSQUE */
+let lastForestFrame=0;
+
+function animateForest(t){
+
+ requestAnimationFrame(animateForest);
+
+ if(document.hidden)return;
+
+ if(scene!=='forest'||t-lastForestFrame<32){
+  if(scene!=='forest')darkCtx.clearRect(0,0,W,H);
+  return;
+ }
+
+ lastForestFrame=t;
+ updateSoundMode();
+
+ const fist=gesture==='fist'&&handVisible;
+
+ document.body.classList.toggle('forest-night',fist);
+
+ dark+=((fist?.94:.02)-dark)*.10;
+ glow+=((fist?1:.20)-glow)*.08;
+
+ forest.style.filter=fist
+  ?'brightness(.92) saturate(.90) contrast(1.08)'
+  :'brightness(1.12) saturate(1.12)';
+
+ darkCtx.clearRect(0,0,W,H);
+
+ if(fist){
+
+  darkCtx.fillStyle=`rgba(0,0,0,${dark.toFixed(3)})`;
+  darkCtx.fillRect(0,0,W,H);
+
+  darkCtx.globalCompositeOperation='destination-out';
+
+  for(const p of particles){
+
+   const pulse=.88+.12*Math.sin(t*.002*p.speed+p.phase);
+   const reach=clamp(155+p.size*19,155,215)*pulse;
+
+   const hole=darkCtx.createRadialGradient(p.x,p.y,2,p.x,p.y,reach);
+
+   hole.addColorStop(0,'rgba(0,0,0,.78)');
+   hole.addColorStop(.20,'rgba(0,0,0,.62)');
+   hole.addColorStop(.52,'rgba(0,0,0,.24)');
+   hole.addColorStop(1,'rgba(0,0,0,0)');
+
+   darkCtx.fillStyle=hole;
+   darkCtx.beginPath();
+   darkCtx.arc(p.x,p.y,reach,0,Math.PI*2);
+   darkCtx.fill();
+  }
+
+  darkCtx.globalCompositeOperation='source-over';
+
+ }else{
+  darkCtx.clearRect(0,0,W,H);
+ }
+
+ fireCtx.clearRect(0,0,W,H);
+ fireCtx.globalCompositeOperation='screen';
+
+ for(const p of particles){
+
+  if(handVisible){
+
+   const a=p.angle+Math.sin(t*.00055+p.phase)*.28;
+   const r=p.radius+Math.sin(t*.0007+p.phase)*10;
+
+   const tx=shared.x+Math.cos(a)*r;
+   const ty=shared.y+Math.sin(a)*r*.72;
+
+   p.vx+=(tx-p.x)*.038;
+   p.vy+=(ty-p.y)*.038;
+
+  }else{
+
+   p.vx+=(p.homeX-p.x)*.0012;
+   p.vy+=(p.homeY-p.y)*.0012;
+  }
+
+  p.vx+=Math.sin(t*.001+p.phase)*.006;
+  p.vy+=Math.cos(t*.001+p.phase)*.006;
+
+  p.vx*=.91;
+  p.vy*=.91;
+
+  const max=handVisible?10:1.1;
+  const speed=Math.hypot(p.vx,p.vy);
+
+  if(speed>max){
+   p.vx=p.vx/speed*max;
+   p.vy=p.vy/speed*max;
+  }
+
+  p.x=clamp(p.x+p.vx,2,W-2);
+  p.y=clamp(p.y+p.vy,2,H-2);
+
+  const wave=.35+.65*(
+   .5+.5*Math.sin(t*.002*p.speed+p.phase)
+  );
+
+  const intensity=glow*wave;
+  const radius=p.size*(.75+intensity*1.4);
+  const halo=radius*(fist?18:4.2);
+
+  const g=fireCtx.createRadialGradient(
+   p.x,p.y,0,p.x,p.y,halo
+  );
+
+  g.addColorStop(
+   0,`rgba(205,255,125,${(fist?.72:.30)*intensity})`
+  );
+
+  g.addColorStop(
+   .3,`rgba(120,255,90,${(fist?.28:.10)*intensity})`
+  );
+
+  g.addColorStop(1,'rgba(100,255,70,0)');
+
+  fireCtx.fillStyle=g;
+  fireCtx.beginPath();
+  fireCtx.arc(p.x,p.y,halo,0,Math.PI*2);
+  fireCtx.fill();
+
+  if(fist){
+
+   const local=fireCtx.createRadialGradient(p.x,p.y,0,p.x,p.y,halo*2.5);
+
+   local.addColorStop(0,`rgba(225,255,170,${.25*intensity})`);
+   local.addColorStop(.22,`rgba(175,245,115,${.15*intensity})`);
+   local.addColorStop(.58,`rgba(125,205,85,${.065*intensity})`);
+   local.addColorStop(1,'rgba(80,180,55,0)');
+
+   fireCtx.fillStyle=local;
+   fireCtx.beginPath();
+   fireCtx.arc(p.x,p.y,halo*2.5,0,Math.PI*2);
+   fireCtx.fill();
+  }
+
+  fireCtx.globalCompositeOperation='source-over';
+
+  fireCtx.fillStyle=
+   `rgba(235,255,185,${.48+intensity*.52})`;
+
+  fireCtx.beginPath();
+  fireCtx.arc(p.x,p.y,radius,0,Math.PI*2);
+  fireCtx.fill();
+ }
+}
+
+requestAnimationFrame(animateForest);
+
+/* OCÉANO */
+let oceanX=W/2,oceanY=H*.55;
+let energy=.16,speedSmooth=0,lastOceanFrame=0;
+
+const ripples=[];
+
+function addRipple(x,y,s){
+
+ ripples.push({
+  x,y,r:5,a:.4,speed:2+s*2
+ });
+
+ if(ripples.length>10)ripples.shift();
+}
+
+function drawWave(base,amp,freq,phase,alpha){
+
+ oceanCtx.beginPath();
+
+ for(let x=0;x<=W+8;x+=7){
+
+  const handInfluence=Math.exp(-Math.pow((x-oceanX)/Math.max(150,W*.24),2));
+
+  const handPush=Math.sin((x-oceanX)*.014+performance.now()*.006)*amp*.85*handInfluence;
+
+  const swell=Math.sin(x*freq+phase)*amp+
+   Math.sin(x*freq*.47-phase*1.25)*amp*.42+
+   Math.sin(x*freq*2.3+phase*.7)*amp*.12+
+   handPush;
+
+  const y=base+swell;
+
+  if(x===0)oceanCtx.moveTo(x,y);
+  else oceanCtx.lineTo(x,y);
+ }
+
+ oceanCtx.lineTo(W,H);
+ oceanCtx.lineTo(0,H);
+ oceanCtx.closePath();
+
+ const g=oceanCtx.createLinearGradient(0,base-amp,0,H);
+
+ g.addColorStop(0,`rgba(130,226,239,${alpha})`);
+ g.addColorStop(.16,`rgba(23,155,185,${alpha*.92})`);
+ g.addColorStop(.55,`rgba(5,83,125,${alpha*.9})`);
+ g.addColorStop(1,'rgba(1,20,48,.98)');
+
+ oceanCtx.fillStyle=g;
+ oceanCtx.fill();
+
+ /* ESPUMA */
+ oceanCtx.beginPath();
+
+ for(let x=0;x<=W+8;x+=7){
+
+  const y=base+
+   Math.sin(x*freq+phase)*amp+
+   Math.sin(x*freq*.47-phase*1.25)*amp*.42+
+   Math.sin(x*freq*2.3+phase*.7)*amp*.12+
+   Math.sin((x-oceanX)*.014+performance.now()*.006)*amp*.85*
+   Math.exp(-Math.pow((x-oceanX)/Math.max(150,W*.24),2));
+
+  if(x===0)oceanCtx.moveTo(x,y-2);
+  else oceanCtx.lineTo(x,y-2);
+ }
+
+ oceanCtx.strokeStyle=`rgba(220,250,255,${alpha*.22})`;
+ oceanCtx.lineWidth=1.2;
+ oceanCtx.stroke();
+}
+
+function drawOceanAtmosphere(t){
+
+ const sky=oceanCtx.createLinearGradient(0,0,0,H*.56);
+
+ sky.addColorStop(0,'#061d38');
+ sky.addColorStop(.58,'#08708f');
+ sky.addColorStop(1,'#70c7d1');
+
+ oceanCtx.fillStyle=sky;
+ oceanCtx.fillRect(0,0,W,H);
+
+ const horizon=H*.43;
+ const sunX=W*.72,sunY=H*.18;
+
+ const glow=oceanCtx.createRadialGradient(
+  sunX,sunY,3,sunX,sunY,Math.max(W,H)*.34
+ );
+
+ glow.addColorStop(0,'rgba(255,239,190,.30)');
+ glow.addColorStop(.22,'rgba(157,226,236,.13)');
+ glow.addColorStop(1,'rgba(120,210,230,0)');
+
+ oceanCtx.fillStyle=glow;
+ oceanCtx.fillRect(0,0,W,H*.72);
+
+ oceanCtx.fillStyle='rgba(2,31,54,.25)';
+ oceanCtx.fillRect(0,horizon,W,2);
+
+ oceanCtx.save();
+ oceanCtx.globalCompositeOperation='screen';
+
+ for(let i=0;i<46;i++){
+
+  const y=horizon+18+((i*37+t*.012)%(H*.43));
+  const spread=22+(y-horizon)*.55;
+  const x=sunX+Math.sin(i*12.7+t*.0003)*spread;
+  const len=8+(i%7)*5;
+
+  oceanCtx.strokeStyle=`rgba(220,250,245,${.035+(i%4)*.012})`;
+  oceanCtx.lineWidth=1;
+
+  oceanCtx.beginPath();
+  oceanCtx.moveTo(x-len,y);
+  oceanCtx.lineTo(x+len,y);
+  oceanCtx.stroke();
+ }
+
+ oceanCtx.restore();
+}
+
+function animateOcean(t){
+
+ requestAnimationFrame(animateOcean);
+
+ if(document.hidden)return;
+
+ if(scene!=='ocean'||t-lastOceanFrame<32)return;
+
+ lastOceanFrame=t;
+ updateSoundMode();
+
+ const s=shared;
+
+ if(s.visible){
+
+  const dx=s.x-oceanX;
+  const dy=s.y-oceanY;
+
+  oceanX+=dx*.28;
+  oceanY+=dy*.28;
+
+  speedSmooth+=(
+   Math.min(2.5,s.speed*1.8)-speedSmooth
+  )*.2;
+
+  energy+=(
+   Math.min(1,.2+speedSmooth*.75)-energy
+  )*.14;
+
+  if(Math.hypot(dx,dy)>25&&Math.random()<.15){
+   addRipple(oceanX,oceanY,speedSmooth);
+  }
+
+ }else{
+
+  speedSmooth*=.94;
+  energy+=(.16-energy)*.04;
+ }
+
+ updateOceanSound();
+
+ oceanCtx.clearRect(0,0,W,H);
+ drawOceanAtmosphere(t);
+
+ drawWave(H*.47,H*(.025+energy*.065),.009,t*.00055,.42);
+ drawWave(H*.57,H*(.035+energy*.085),.011,-t*.00072+1.4,.56);
+ drawWave(H*.68,H*(.045+energy*.105),.008,t*.00048+2.8,.72);
+ drawWave(H*.80,H*(.052+energy*.12),.013,-t*.00062+.7,.86);
+ drawWave(H*.93,H*(.035+energy*.09),.017,t*.00081+2.1,.98);
+
+ oceanCtx.save();
+ oceanCtx.globalCompositeOperation='screen';
+
+ for(let i=0;i<30;i++){
+
+  const x=(i*173+t*(.012+energy*.018))%(W+80)-40;
+  const y=H*(.49+(i%12)*.041);
+
+  oceanCtx.strokeStyle=`rgba(205,248,255,${.07+(i%4)*.025})`;
+  oceanCtx.lineWidth=1+(i%3)*.35;
+
+  oceanCtx.beginPath();
+  oceanCtx.moveTo(x,y);
+  oceanCtx.lineTo(x+18+(i%5)*11,y-Math.sin(t*.002+i)*1.4);
+  oceanCtx.stroke();
+ }
+
+ oceanCtx.restore();
+
+ for(let i=ripples.length-1;i>=0;i--){
+
+  const r=ripples[i];
+
+  r.r+=r.speed;
+  r.a*=.985;
+
+  oceanCtx.beginPath();
+
+  oceanCtx.ellipse(
+   r.x,r.y,r.r*1.5,r.r*.42,
+   0,0,Math.PI*2
+  );
+
+  oceanCtx.strokeStyle=`rgba(205,249,255,${r.a})`;
+  oceanCtx.lineWidth=1.5;
+  oceanCtx.stroke();
+
+  if(r.a<.025||r.r>Math.max(W,H)*.5){
+   ripples.splice(i,1);
+  }
+ }
+
+ if(s.visible){
+
+  const g=oceanCtx.createRadialGradient(
+   oceanX,oceanY,2,oceanX,oceanY,120
+  );
+
+  g.addColorStop(0,'rgba(190,250,255,.19)');
+  g.addColorStop(1,'rgba(120,225,255,0)');
+
+  oceanCtx.fillStyle=g;
+  oceanCtx.beginPath();
+  oceanCtx.arc(oceanX,oceanY,120,0,Math.PI*2);
+  oceanCtx.fill();
+ }
+}
+
+requestAnimationFrame(animateOcean);
+
+updateInstructions();
+
+})();
+</script>
+
+</body>
+</html>

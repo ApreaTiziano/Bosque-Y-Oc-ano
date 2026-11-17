@@ -1,0 +1,277 @@
+
+*{
+ box-sizing:border-box;
+}
+
+html,body{
+ margin:0;
+ width:100%;
+ height:100%;
+ overflow:hidden;
+ background:#020806;
+ font-family:Arial,sans-serif;
+}
+
+/* BOSQUE DE DÍA */
+#forest{
+ position:fixed;
+ inset:0;
+ background:
+ linear-gradient(to bottom,rgba(0,15,12,.02),rgba(0,8,5,.18)),
+ url("./bosquedia.png")
+ center/cover no-repeat;
+ transition:filter .7s ease;
+}
+
+/* BOSQUE DE NOCHE */
+#forest::before{
+ content:"";
+ position:absolute;
+ inset:0;
+ pointer-events:none;
+ opacity:0;
+ transition:opacity .8s ease;
+ background:url("./bosquenoche.png") center/cover no-repeat;
+}
+
+body.forest-night:not(.ocean-active) #forest::before{
+ opacity:1;
+}
+
+/* LUZ AZUL DE LA NOCHE */
+#forest::after{
+ content:"";
+ position:absolute;
+ inset:0;
+ pointer-events:none;
+ opacity:0;
+ transition:opacity .8s ease;
+ background:linear-gradient(
+  180deg,
+  rgba(7,22,65,.12),
+  rgba(1,8,35,.28)
+ );
+}
+
+body.forest-night:not(.ocean-active) #forest::after{
+ opacity:1;
+}
+
+#darkness{
+ position:fixed;
+ inset:0;
+ width:100%;
+ height:100%;
+ pointer-events:none;
+}
+
+#fireflies{
+ position:fixed;
+ inset:0;
+ width:100%;
+ height:100%;
+ pointer-events:none;
+}
+
+/* PANEL DE CONTROL */
+#panel{
+ position:fixed;
+ top:10px;
+ left:10px;
+ z-index:10;
+ width:180px;
+ padding:8px;
+ border:1px solid #b4ffbe33;
+ border-radius:9px;
+ color:#eaffdf;
+ background:#03150abf;
+ backdrop-filter:blur(5px);
+ font-size:10px;
+ transition:opacity .2s ease;
+}
+
+/* OCULTAR PANEL */
+#panel.panel-hidden{
+ display:none;
+}
+
+#status{
+ margin-bottom:6px;
+ line-height:1.4;
+ color:#d8f8d1;
+}
+
+button{
+ width:100%;
+ padding:8px 5px;
+ margin-top:5px;
+ border:0;
+ border-radius:6px;
+ font-size:10px;
+ font-weight:bold;
+ cursor:pointer;
+}
+
+#start{
+ background:#c8ff9b;
+ color:#07150a;
+}
+
+#cameraVisibility{
+ background:#526e50;
+ color:white;
+}
+
+#sceneToggle{
+ background:#145f7d;
+ color:white;
+ border:1px solid #96e1ff55;
+}
+
+#soundToggle{
+ background:#55427b;
+ color:white;
+ border:1px solid #d9c4ff55;
+}
+
+#help{
+ margin-top:7px;
+ color:#c2d9c0;
+ font-size:9px;
+ line-height:1.45;
+}
+
+#help strong{
+ display:block;
+ margin-bottom:4px;
+ color:#a9efff;
+ font-size:10px;
+}
+
+/* BOTÓN PARA OCULTAR Y MOSTRAR EL PANEL */
+#panelToggle{
+ position:fixed;
+ top:15px;
+ right:15px;
+ z-index:10000;
+ width:auto;
+ padding:9px 14px;
+ margin:0;
+ border:1px solid #ffffff55;
+ border-radius:20px;
+ background:rgba(0,28,48,.85);
+ color:white;
+ font-size:12px;
+ cursor:pointer;
+ backdrop-filter:blur(6px);
+ transition:background .25s,transform .25s;
+}
+
+#panelToggle:hover{
+ background:#075477;
+ transform:scale(1.05);
+}
+
+/* VISTA DE LA CÁMARA */
+#preview{
+ display:none;
+ position:fixed;
+ right:10px;
+ bottom:10px;
+ z-index:9;
+ width:150px;
+ aspect-ratio:4/3;
+ overflow:hidden;
+ border-radius:8px;
+ border:1px solid #beffb0;
+ background:#07110c;
+}
+
+#video,#handCanvas{
+ position:absolute;
+ inset:0;
+ width:100%;
+ height:100%;
+ object-fit:cover;
+ transform:scaleX(-1);
+}
+
+#handCanvas{
+ pointer-events:none;
+}
+
+/* ESCENARIO DEL OCÉANO */
+#oceanScene{
+ display:none;
+ position:fixed;
+ inset:0;
+ z-index:1;
+ overflow:hidden;
+ background:linear-gradient(
+  180deg,
+  #061b34 0%,
+  #0b4564 34%,
+  #087e99 58%,
+  #031b35 100%
+ );
+}
+
+body.ocean-active #oceanScene{
+ display:block;
+}
+
+body.ocean-active #forest,
+body.ocean-active #darkness,
+body.ocean-active #fireflies{
+ display:none;
+}
+
+#oceanCanvas{
+ position:absolute;
+ inset:0;
+ width:100%;
+ height:100%;
+}
+
+#oceanScene:before{
+ content:"";
+ position:absolute;
+ inset:0;
+ pointer-events:none;
+ background:
+ radial-gradient(
+  ellipse at 50% 8%,
+  #9be7ff40,
+  transparent 42%
+ ),
+ linear-gradient(
+  180deg,
+  transparent 45%,
+  #000c2333
+ );
+}
+
+/* ADAPTACIÓN A CELULARES */
+@media(max-width:600px){
+
+ #panel{
+  top:6px;
+  left:6px;
+  width:155px;
+  padding:6px;
+ }
+
+ #preview{
+  width:115px;
+  right:6px;
+  bottom:6px;
+ }
+
+ #panelToggle{
+  top:8px;
+  right:8px;
+  padding:8px 11px;
+  font-size:11px;
+ }
+}
+
